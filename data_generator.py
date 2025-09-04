@@ -10,12 +10,14 @@ from dotenv import load_dotenv
 
 import news_store
 import training_data_store
+import navarasa  # Import the new navarasa module
 
 class DataGenerator:
     def __init__(self):
         self.selected_model = None
-        self.model_type = None  # 'gemini' or 'ollama'
+        self.model_type = None  # 'gemini', 'ollama', or 'navarasa'
         self.gemini_api_key = None
+        self.navarasa_instance = None
         self.processed_articles = set()  # Track articles being processed in current session
         
         # Load environment variables
@@ -114,8 +116,9 @@ class DataGenerator:
         print("\n=== Model Selection ===")
         print("1. Gemini API (Online)")
         print("2. Ollama (Offline)")
+        print("3. Navarasa 2.0 (Local - Indic Multilingual)")
         
-        choice = input("Select model type (1 or 2): ").strip()
+        choice = input("Select model type (1, 2, or 3): ").strip()
         
         if choice == "1":
             self.model_type = "gemini"
@@ -176,6 +179,54 @@ class DataGenerator:
             except ValueError:
                 print("Invalid input.")
                 return False
+                
+        elif choice == "3":
+            self.model_type = "navarasa"
+            
+            # Check if Navarasa is available
+            if not navarasa.is_navarasa_available():
+                print("\n❌ Navarasa is not available on this system.")
+                print("Requirements:")
+                print("- CUDA GPU with 12GB+ VRAM (recommended)")
+                print("- OR 24GB+ system RAM for CPU inference")
+                print("- PyTorch and Transformers libraries")
+                
+                install_deps = input("Try to install missing dependencies? (y/n): ").strip().lower()
+                if install_deps in ['y', 'yes']:
+                    navarasa_temp = navarasa.NavaraSa()
+                    if not navarasa_temp.install_dependencies():
+                        return False
+                else:
+                    return False
+            
+            # Show Navarasa info
+            info = navarasa.get_navarasa_info()
+            print(f"\n📋 Model Information:")
+            print(f"   Name: {info['name']}")
+            print(f"   Size: {info['size']}")
+            print(f"   Device: {info['device']}")
+            print(f"   Languages: {', '.join(info['languages'][:5])}... (+{len(info['languages'])-5} more)")
+            
+            # Ask for HF token if needed
+            hf_token = os.getenv('HF_TOKEN')
+            if not hf_token:
+                print("\n💡 Optional: Hugging Face token can help with faster downloads")
+                hf_token = input("Enter HF token (or press Enter to skip): ").strip()
+                if not hf_token:
+                    hf_token = None
+            
+            # Initialize and load Navarasa
+            self.navarasa_instance = navarasa.create_navarasa_instance()
+            
+            print("\n🔄 Loading Navarasa model...")
+            if not self.navarasa_instance.load_model(hf_token):
+                print("Failed to load Navarasa model.")
+                return False
+            
+            self.selected_model = "Navarasa-2.0"
+            print(f"✅ Selected: {self.selected_model}")
+            return True
+            
         else:
             print("Invalid choice.")
             return False
@@ -254,7 +305,13 @@ class DataGenerator:
     
     def generate_qa_pairs(self, article_content: str) -> Optional[str]:
         """Generate Q&A pairs for an article"""
-        prompt = """Provide me some good quality question and answers for the attached article to generate synthetic training data to perform a parameter efficient fine tuning on an LLM. The questions should be how a user might ask about the article content, and the answers should be how the model must respond to that question.
+        if self.model_type == "navarasa":
+            if not self.navarasa_instance:
+                print("Navarasa instance not available")
+                return None
+            return self.navarasa_instance.generate_qa_pairs(article_content)
+        elif self.model_type == "gemini":
+            prompt = """Provide me some good quality question and answers for the attached article to generate synthetic training data to perform a parameter efficient fine tuning on an LLM. The questions should be how a user might ask about the article content, and the answers should be how the model must respond to that question.
 
 Strictly follow this format:
 
@@ -265,10 +322,19 @@ QUESTION: <enter your question>
 ANSWER: <enter your answer>
 
 Generate 3-5 high-quality question-answer pairs that cover different aspects of the article."""
-        
-        if self.model_type == "gemini":
             return self.call_gemini_api(prompt, article_content)
         elif self.model_type == "ollama":
+            prompt = """Provide me some good quality question and answers for the attached article to generate synthetic training data to perform a parameter efficient fine tuning on an LLM. The questions should be how a user might ask about the article content, and the answers should be how the model must respond to that question.
+
+Strictly follow this format:
+
+QUESTION: <enter your question>
+ANSWER: <enter your answer>
+
+QUESTION: <enter your question>
+ANSWER: <enter your answer>
+
+Generate 3-5 high-quality question-answer pairs that cover different aspects of the article."""
             return self.call_ollama(prompt, article_content)
         else:
             return None
@@ -417,6 +483,11 @@ Generate 3-5 high-quality question-answer pairs that cover different aspects of 
         print(f"❌ Failed to process: {failed_count}")
         print(f"📈 Success rate: {(processed_count/(len(all_articles)-skipped_count)*100):.1f}%" if (len(all_articles)-skipped_count) > 0 else "N/A")
         print("\n🎉 Training data generation complete!")
+
+    def __del__(self):
+        """Cleanup when object is destroyed"""
+        if self.navarasa_instance:
+            self.navarasa_instance.unload_model()
 
 def main():
     generator = DataGenerator()
